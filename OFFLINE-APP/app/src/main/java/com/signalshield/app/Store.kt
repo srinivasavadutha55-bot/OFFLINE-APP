@@ -34,6 +34,20 @@ object Store {
     val allowMobile = MutableStateFlow(true)
     val apps = MutableStateFlow<List<AppUse>>(emptyList())
 
+    // what the hub fills with
+    val wantNews = MutableStateFlow(true)
+    val wantPods = MutableStateFlow(true)
+    val wantSongs = MutableStateFlow(true)
+    val wantVideos = MutableStateFlow(true)
+    val videoMobile = MutableStateFlow(false)
+    val musicStyle = MutableStateFlow("chill")
+
+    // offline search library
+    val topics = MutableStateFlow<List<String>>(emptyList())
+    val pending = MutableStateFlow<List<Pending>>(emptyList())
+    val libStatus = MutableStateFlow("")
+    val libTs = MutableStateFlow(0L)
+
     fun init(ctx: Context) {
         if (prefs != null) return
         val p = ctx.applicationContext.getSharedPreferences("signalshield", Context.MODE_PRIVATE)
@@ -45,6 +59,93 @@ object Store {
         apps.value = loadApps()
         targetMin.value = p.getInt("target", 30)
         allowMobile.value = p.getBoolean("mobile", true)
+        wantNews.value = p.getBoolean("wantNews", true)
+        wantPods.value = p.getBoolean("wantPods", true)
+        wantSongs.value = p.getBoolean("wantSongs", true)
+        wantVideos.value = p.getBoolean("wantVideos", true)
+        videoMobile.value = p.getBoolean("videoMobile", false)
+        musicStyle.value = p.getString("musicStyle", "chill") ?: "chill"
+        topics.value = loadStrings("topics")
+        pending.value = loadPending()
+        libTs.value = p.getLong("libTs", 0L)
+    }
+
+    // ---------- hub content choices ----------
+    fun setFlag(key: String, flow: MutableStateFlow<Boolean>, on: Boolean) {
+        flow.value = on
+        prefs?.edit()?.putBoolean(key, on)?.apply()
+    }
+
+    fun setMusicStyle(style: String) {
+        musicStyle.value = style
+        prefs?.edit()?.putString("musicStyle", style)?.apply()
+    }
+
+    fun setLibTs(ts: Long) {
+        libTs.value = ts
+        prefs?.edit()?.putLong("libTs", ts)?.apply()
+    }
+
+    // ---------- offline search library ----------
+    fun addTopic(t: String) {
+        val v = t.trim()
+        if (v.isEmpty() || topics.value.any { it.equals(v, ignoreCase = true) }) return
+        topics.value = topics.value + v
+        saveStrings("topics", topics.value)
+        setLibTs(0L) // fetch the new topic on the next fill
+    }
+
+    fun removeTopic(t: String) {
+        topics.value = topics.value.filter { it != t }
+        saveStrings("topics", topics.value)
+    }
+
+    fun addPending(q: String) {
+        val v = q.trim()
+        if (v.isEmpty() || pending.value.any { it.query.equals(v, ignoreCase = true) }) return
+        pending.value = pending.value + Pending(System.currentTimeMillis(), v, System.currentTimeMillis())
+        savePending()
+    }
+
+    @Synchronized
+    fun removePending(id: Long) {
+        pending.value = pending.value.filter { it.id != id }
+        savePending()
+    }
+
+    private fun savePending() {
+        val arr = JSONArray()
+        pending.value.forEach { arr.put(JSONObject().put("id", it.id).put("q", it.query).put("ts", it.ts)) }
+        prefs?.edit()?.putString("pending", arr.toString())?.apply()
+    }
+
+    private fun loadPending(): List<Pending> {
+        val s = prefs?.getString("pending", null) ?: return emptyList()
+        return try {
+            val a = JSONArray(s)
+            (0 until a.length()).map {
+                val o = a.getJSONObject(it)
+                Pending(o.getLong("id"), o.getString("q"), o.getLong("ts"))
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveStrings(key: String, list: List<String>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it) }
+        prefs?.edit()?.putString(key, arr.toString())?.apply()
+    }
+
+    private fun loadStrings(key: String): List<String> {
+        val s = prefs?.getString(key, null) ?: return emptyList()
+        return try {
+            val a = JSONArray(s)
+            (0 until a.length()).map { a.getString(it) }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     // ---------- dead zones ----------

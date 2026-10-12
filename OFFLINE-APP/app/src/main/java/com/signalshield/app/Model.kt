@@ -38,7 +38,7 @@ val LABELS = listOf("No internet", "Very weak", "Weak", "Okay", "Strong")
 
 data class HubItem(
     val id: Long,
-    val type: String,      // "article" or "audio"
+    val type: String,      // article, audio (podcast), song, video, wiki, saved
     val title: String,
     val source: String,
     val seconds: Int,
@@ -50,3 +50,8 @@ data class HubItem(
 data class Feed(val name: String, val url: String)
 
 data class AppUse(val pkg: String, val label: String, val seconds: Int)
+
+data class Pending(val id: Long, val query: String, val ts: Long)
+
+/** Item types that count toward the backup hub's 15 or 30 minute target. */
+val COUNTED = setOf("article", "audio", "song", "video")

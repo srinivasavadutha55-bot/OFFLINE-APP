@@ -11,7 +11,7 @@ object AudioPlayer {
     private var mp: MediaPlayer? = null
     val playingId = MutableStateFlow<Long?>(null)
 
-    fun toggle(ctx: Context, item: HubItem) {
+    fun toggle(ctx: Context, item: HubItem, queue: List<HubItem> = emptyList()) {
         if (playingId.value == item.id) {
             stop()
             return
@@ -21,12 +21,20 @@ object AudioPlayer {
         try {
             p.setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setContentType(
+                        if (item.type == "song") AudioAttributes.CONTENT_TYPE_MUSIC
+                        else AudioAttributes.CONTENT_TYPE_SPEECH)
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .build())
             p.setWakeMode(ctx.applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
             p.setDataSource(File(Hub.dir(ctx), item.file).absolutePath)
-            p.setOnCompletionListener { stop() }
+            p.setOnCompletionListener {
+                // Play the next song in the list, if there is one.
+                val i = queue.indexOfFirst { it.id == item.id }
+                val next = if (i >= 0 && i + 1 < queue.size) queue[i + 1] else null
+                stop()
+                if (next != null) toggle(ctx, next, queue)
+            }
             p.setOnErrorListener { _, _, _ -> stop(); true }
             p.prepare()
             p.start()

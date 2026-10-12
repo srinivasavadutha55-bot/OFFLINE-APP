@@ -59,6 +59,7 @@ class MonitorService : Service() {
     private var nid = 100
 
     private var lastHub = 0L
+    private var lastPending = 0L
     private var currentFg: String? = null
     private var lastUsageQuery = 0L
 
@@ -249,6 +250,11 @@ class MonitorService : Service() {
         if (!backup && score >= 3 && now - lastHub > interval) {
             lastHub = now
             Hub.refreshAsync(applicationContext)
+        }
+        // Searches and pages asked for with no signal: look them up as soon as signal is good.
+        if (!backup && score >= 3 && Store.pending.value.isNotEmpty() && now - lastPending > 60000L) {
+            lastPending = now
+            Hub.runPendingAsync(applicationContext)
         }
 
         Store.warning.value = warnText
