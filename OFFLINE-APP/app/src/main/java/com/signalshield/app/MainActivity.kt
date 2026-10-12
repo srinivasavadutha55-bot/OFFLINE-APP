@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
@@ -44,6 +45,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +61,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import android.widget.MediaController
+import android.widget.VideoView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import java.io.File
@@ -73,6 +81,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Store.init(this)
+        handleShare(intent)
         setContent {
             MaterialTheme(
                 colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
@@ -80,6 +89,85 @@ class MainActivity : ComponentActivity() {
                 Surface(Modifier.fillMaxSize()) { App() }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShare(intent)
+    }
+
+    /** A page shared from Chrome (or any app) is saved for offline reading. */
+    private fun handleShare(i: Intent?) {
+        if (i?.action != Intent.ACTION_SEND) return
+        val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        val url = Regex("https?://\\S+").find(text)?.value
+        if (url == null) {
+            Toast.makeText(this, "Share a web page link to save it offline.", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Saving this page for offline reading...", Toast.LENGTH_SHORT).show()
+        Hub.saveLinkAsync(this, url)
+    }
+}
+
+private val KIND = mapOf(
+    "article" to "News", "audio" to "Podcast", "song" to "Song", "video" to "Video",
+    "wiki" to "Wikipedia", "saved" to "Saved page"
+)
+
+@Composable
+fun Toggle(label: String, on: Boolean, set: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Switch(checked = on, onCheckedChange = set)
+        Spacer(Modifier.width(10.dp))
+        Text(label, Modifier.weight(1f))
+    }
+}
+
+@Composable
+fun ItemCard(
+    item: HubItem,
+    playing: Long?,
+    onPlay: (HubItem) -> Unit,
+    onWatch: (HubItem) -> Unit,
+    onRead: (HubItem) -> Unit
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(item.title, fontWeight = FontWeight.Bold)
+            Text("${KIND[item.type] ?: item.type} · ${maxOf(1, item.seconds / 60)} min · ${item.source}")
+            when (item.type) {
+                "audio", "song" -> Button(onClick = { onPlay(item) }) { Text(if (playing == item.id) "Stop" else "Play") }
+                "video" -> Button(onClick = { onWatch(item) }) { Text("Watch") }
+                else -> Button(onClick = { onRead(item) }) { Text("Read") }
+            }
+        }
+    }
+}
+
+@Composable
+fun Player(item: HubItem, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedButton(onClick = onBack) { Text("Back") }
+        Text(item.title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text(item.source)
+        AndroidView(
+            factory = { c ->
+                VideoView(c).apply {
+                    val mc = MediaController(c)
+                    mc.setAnchorView(this)
+                    setMediaController(mc)
+                    setVideoPath(File(Hub.dir(c), item.file).absolutePath)
+                    setOnPreparedListener { start() }
+                    setOnErrorListener { _, _, _ ->
+                        Toast.makeText(c, "Could not play this video.", Toast.LENGTH_SHORT).show()
+                        true
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth().weight(1f)
+        )
     }
 }
 
@@ -141,13 +229,26 @@ fun App() {
     val mobile by Store.allowMobile.collectAsState()
     val apps by Store.apps.collectAsState()
     val playing by AudioPlayer.playingId.collectAsState()
+    val wantNews by Store.wantNews.collectAsState()
+    val wantPods by Store.wantPods.collectAsState()
+    val wantSongs by Store.wantSongs.collectAsState()
+    val wantVideos by Store.wantVideos.collectAsState()
+    val videoMobile by Store.videoMobile.collectAsState()
+    val musicStyle by Store.musicStyle.collectAsState()
+    val topics by Store.topics.collectAsState()
+    val pending by Store.pending.collectAsState()
+    val libStatus by Store.libStatus.collectAsState()
+    val uiScope = rememberCoroutineScope()
+    var watching by remember { mutableStateOf<HubItem?>(null) }
+    var filter by remember { mutableStateOf("all") }
 
     var reading by remember { mutableStateOf<HubItem?>(null) }
     var usageOk by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
             usageOk = Usage.hasAccess(ctx)
-            delay(2000)
+            if (Store.pending.value.isNotEmpty() && Hub.isOnline(ctx)) Hub.runPendingAsync(ctx)
+            delay(if (Store.pending.value.isNotEmpty()) 15000L else 2000L)
         }
     }
 
@@ -174,9 +275,12 @@ fun App() {
     val live = running && snap.time > 0L
     val bandColor = if (live) BAND[snap.score.coerceIn(0, 4)] else IDLE
     val readingItem = reading
+    val watchingItem = watching
 
     if (readingItem != null) {
         Reader(readingItem) { reading = null }
+    } else if (watchingItem != null) {
+        Player(watchingItem) { watching = null }
     } else {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
 
@@ -264,8 +368,8 @@ fun App() {
 
                 // ---- backup hub ----
                 Text("Backup hub", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text("Fills itself with news to read and audio to hear, so you have something to do when signal drops. No taps needed.")
-                val total = hub.sumOf { it.seconds } / 60
+                Text("Fills itself with songs, videos, news and podcasts, so you have something to enjoy when signal drops. No taps needed.")
+                val total = hub.filter { it.type in COUNTED }.sumOf { it.seconds } / 60
                 LinearProgressIndicator(
                     progress = { (total.toFloat() / target).coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth()
@@ -279,27 +383,157 @@ fun App() {
                     }
                     OutlinedButton(onClick = { Hub.refreshAsync(ctx) }) { Text("Fill now") }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = mobile, onCheckedChange = { Store.setMobile(it) })
-                    Spacer(Modifier.width(10.dp))
-                    Text("Also fill using mobile data", Modifier.weight(1f))
+
+                Text("Fill with", fontWeight = FontWeight.Bold)
+                Toggle("Songs", wantSongs) { Store.setFlag("wantSongs", Store.wantSongs, it) }
+                Toggle("Videos (Wi-Fi only unless allowed below)", wantVideos) { Store.setFlag("wantVideos", Store.wantVideos, it) }
+                Toggle("News to read", wantNews) { Store.setFlag("wantNews", Store.wantNews, it) }
+                Toggle("Podcasts", wantPods) { Store.setFlag("wantPods", Store.wantPods, it) }
+                Toggle("Also fill using mobile data", mobile) { Store.setMobile(it) }
+                Toggle("Allow videos on mobile data (uses more data)", videoMobile) { Store.setFlag("videoMobile", Store.videoMobile, it) }
+
+                var style by remember(musicStyle) { mutableStateOf(musicStyle) }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(style, { style = it }, label = { Text("Music style, e.g. lofi, rock, piano") },
+                        modifier = Modifier.weight(1f), singleLine = true)
+                    OutlinedButton(onClick = {
+                        Store.setMusicStyle(style.trim())
+                        Toast.makeText(ctx, "Saved. New songs will match this style.", Toast.LENGTH_SHORT).show()
+                    }) { Text("Save") }
+                }
+                Text("Songs and videos are free, download-allowed ones from the Internet Archive.", fontSize = 13.sp)
+
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("all" to "All", "song" to "Songs", "video" to "Videos",
+                        "article" to "News", "audio" to "Podcasts").forEach { (k, label) ->
+                        if (filter == k) Button(onClick = { filter = k }) { Text(label, fontSize = 12.sp) }
+                        else OutlinedButton(onClick = { filter = k }) { Text(label, fontSize = 12.sp) }
+                    }
+                }
+                val shown = hub.filter { it.type in COUNTED && (filter == "all" || it.type == filter) }
+                    .sortedByDescending { it.ts }
+                val songs = hub.filter { it.type == "song" }.sortedByDescending { it.ts }
+                if (songs.size > 1 && (filter == "all" || filter == "song")) {
+                    Button(onClick = {
+                        if (songs.any { it.id == playing }) AudioPlayer.stop()
+                        else AudioPlayer.toggle(ctx, songs[0], songs)
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (playing != null && songs.any { it.id == playing }) "Stop music" else "Play all songs (${songs.size})")
+                    }
+                }
+                if (shown.isEmpty()) Text("Nothing here yet. Stay on good signal and it fills by itself.")
+
+                val play: (HubItem) -> Unit = { item ->
+                    AudioPlayer.toggle(ctx, item, if (item.type == "song") songs else emptyList())
+                }
+                val watch: (HubItem) -> Unit = { item ->
+                    AudioPlayer.stop()
+                    watching = item
+                }
+                val read: (HubItem) -> Unit = { item -> reading = item }
+                shown.forEach { ItemCard(it, playing, play, watch, read) }
+
+                // ---- YouTube ----
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("YouTube offline", fontWeight = FontWeight.Bold)
+                        Text("SignalShield cannot save YouTube videos. YouTube does not allow other apps to download them. " +
+                            "With YouTube Premium, YouTube can do it by itself: open YouTube, tap You, then Downloads, then Settings, and turn on Smart downloads.")
+                        OutlinedButton(onClick = {
+                            val i = ctx.packageManager.getLaunchIntentForPackage("com.google.android.youtube")
+                            if (i != null) openSafely(ctx, i)
+                            else Toast.makeText(ctx, "YouTube is not installed.", Toast.LENGTH_SHORT).show()
+                        }) { Text("Open YouTube") }
+                    }
                 }
 
-                hub.sortedByDescending { it.ts }.forEach { item ->
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(item.title, fontWeight = FontWeight.Bold)
-                            val kind = if (item.type == "audio") "Audio" else "Article"
-                            Text("$kind · ${maxOf(1, item.seconds / 60)} min · ${item.source}")
-                            if (item.type == "audio") {
-                                Button(onClick = { AudioPlayer.toggle(ctx, item) }) {
-                                    Text(if (playing == item.id) "Stop" else "Play")
+                // ---- search (works offline) ----
+                Text("Search, even with no signal", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("Searches everything saved on your phone. With signal, it also looks your question up and saves the answers. " +
+                    "With no signal, it remembers your question, looks it up when signal is back, and tells you.")
+                var q by remember { mutableStateOf("") }
+                var results by remember { mutableStateOf<List<HubItem>>(emptyList()) }
+                var searched by remember { mutableStateOf("") }
+                OutlinedTextField(q, { q = it }, label = { Text("Search") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val query = q.trim()
+                        if (query.isNotEmpty()) {
+                            searched = query
+                            uiScope.launch {
+                                results = withContext(Dispatchers.IO) { Hub.searchLocal(ctx, query) }
+                                if (Hub.isOnline(ctx)) {
+                                    Store.libStatus.value = "Looking up \"$query\" and saving it for offline..."
+                                    val n = withContext(Dispatchers.IO) {
+                                        try { Hub.searchOnline(ctx, query) } catch (e: Exception) { 0 }
+                                    }
+                                    results = withContext(Dispatchers.IO) { Hub.searchLocal(ctx, query) }
+                                    Store.libStatus.value =
+                                        if (n > 0) "Saved $n page${if (n > 1) "s" else ""}. They work offline now."
+                                        else "Nothing new found online. Try Google for more."
+                                } else {
+                                    Store.addPending(query)
+                                    Store.libStatus.value = "No signal. Your search is saved. SignalShield will look it up when signal is back and tell you."
                                 }
-                            } else {
-                                Button(onClick = { reading = item }) { Text("Read") }
                             }
                         }
+                    }) { Text("Search") }
+                    OutlinedButton(onClick = {
+                        val query = q.trim()
+                        if (query.isNotEmpty()) {
+                            if (Hub.isOnline(ctx)) {
+                                openSafely(ctx, Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://www.google.com/search?q=" + Uri.encode(query))))
+                            } else {
+                                Toast.makeText(ctx, "Google needs signal. Tap Search to look in your saved pages.", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }) { Text("Open in Google") }
+                }
+                if (libStatus.isNotEmpty()) Text(libStatus)
+                if (searched.isNotEmpty()) {
+                    if (results.isEmpty()) Text("Nothing saved matches \"$searched\" yet.")
+                    results.forEach { ItemCard(it, playing, play, watch, read) }
+                }
+                if (pending.isNotEmpty()) {
+                    Text("Waiting for signal", fontWeight = FontWeight.Bold)
+                    pending.forEach { pq ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (pq.query.startsWith("http")) "Save page: ${pq.query}" else "Search: ${pq.query}",
+                                Modifier.weight(1f))
+                            OutlinedButton(onClick = { Store.removePending(pq.id) }) { Text("Cancel") }
+                        }
                     }
+                }
+
+                val lib = hub.filter { it.type == "wiki" || it.type == "saved" }.sortedByDescending { it.ts }
+                Text("Saved for offline reading: ${lib.size} pages", fontWeight = FontWeight.Bold)
+                Text("It saves today's popular Wikipedia pages by itself. To keep a page from Chrome, tap Share in Chrome and choose SignalShield.", fontSize = 13.sp)
+                var showLib by remember { mutableStateOf(false) }
+                if (lib.isNotEmpty()) {
+                    OutlinedButton(onClick = { showLib = !showLib }) { Text(if (showLib) "Hide saved pages" else "Show saved pages") }
+                    if (showLib) lib.take(40).forEach { ItemCard(it, playing, play, watch, read) }
+                }
+
+                Text("Topics to keep offline", fontWeight = FontWeight.Bold)
+                Text("Pages about these topics are saved and refreshed by themselves, for example: cricket, Hyderabad, your exam subject.", fontSize = 13.sp)
+                topics.forEach { t ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(t, Modifier.weight(1f))
+                        OutlinedButton(onClick = { Store.removeTopic(t) }) { Text("Remove") }
+                    }
+                }
+                var topic by remember { mutableStateOf("") }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(topic, { topic = it }, label = { Text("Add a topic") },
+                        modifier = Modifier.weight(1f), singleLine = true)
+                    OutlinedButton(onClick = {
+                        if (topic.isNotBlank()) {
+                            Store.addTopic(topic)
+                            topic = ""
+                            Hub.refreshAsync(ctx)
+                        }
+                    }) { Text("Add") }
                 }
 
                 // ---- apps ----
