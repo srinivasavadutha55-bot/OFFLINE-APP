@@ -720,7 +720,7 @@ object Hub {
             val pi = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java),
                 PendingIntent.FLAG_IMMUTABLE)
             val n = Notification.Builder(ctx, MonitorService.CH_ALERT)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle("SignalShield")
                 .setContentText(msg)
                 .setStyle(Notification.BigTextStyle().bigText(msg))

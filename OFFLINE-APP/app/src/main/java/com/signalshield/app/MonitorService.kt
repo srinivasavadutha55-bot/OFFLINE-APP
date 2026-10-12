@@ -283,7 +283,7 @@ class MonitorService : Service() {
             Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
             "Stop", stop).build()
         return Notification.Builder(this, CH_MON)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle("SignalShield is watching")
             .setContentText(text)
             .setContentIntent(openApp())
@@ -295,7 +295,7 @@ class MonitorService : Service() {
     private fun alert(msg: String) {
         try {
             val n = Notification.Builder(this, CH_ALERT)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle("SignalShield")
                 .setContentText(msg)
                 .setStyle(Notification.BigTextStyle().bigText(msg))
