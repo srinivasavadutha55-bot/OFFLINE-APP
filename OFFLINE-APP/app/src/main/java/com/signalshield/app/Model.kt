@@ -35,3 +35,18 @@ data class Snapshot(
 )
 
 val LABELS = listOf("No internet", "Very weak", "Weak", "Okay", "Strong")
+
+data class HubItem(
+    val id: Long,
+    val type: String,      // "article" or "audio"
+    val title: String,
+    val source: String,
+    val seconds: Int,
+    val file: String,
+    val ts: Long,
+    val url: String
+)
+
+data class Feed(val name: String, val url: String)
+
+data class AppUse(val pkg: String, val label: String, val seconds: Int)

@@ -12,6 +12,13 @@ import kotlin.math.roundToInt
 object Store {
     private var prefs: SharedPreferences? = null
 
+    val DEFAULT_FEEDS = listOf(
+        Feed("BBC World News", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+        Feed("The Hindu - National", "https://www.thehindu.com/news/national/feeder/default.rss"),
+        Feed("BBC Global News Podcast", "https://podcasts.files.bbci.co.uk/p02nq0gn.rss"),
+        Feed("NPR Up First", "https://feeds.npr.org/510318/podcast.xml")
+    )
+
     val snapshot = MutableStateFlow(Snapshot())
     val history = MutableStateFlow<List<Int>>(emptyList())
     val zones = MutableStateFlow<List<Zone>>(emptyList())
@@ -20,11 +27,24 @@ object Store {
     val running = MutableStateFlow(false)
     val backupOn = MutableStateFlow(false)
 
+    val hub = MutableStateFlow<List<HubItem>>(emptyList())
+    val feeds = MutableStateFlow(DEFAULT_FEEDS)
+    val hubStatus = MutableStateFlow("Not filled yet")
+    val targetMin = MutableStateFlow(30)
+    val allowMobile = MutableStateFlow(true)
+    val apps = MutableStateFlow<List<AppUse>>(emptyList())
+
     fun init(ctx: Context) {
         if (prefs != null) return
-        prefs = ctx.applicationContext.getSharedPreferences("signalshield", Context.MODE_PRIVATE)
+        val p = ctx.applicationContext.getSharedPreferences("signalshield", Context.MODE_PRIVATE)
+        prefs = p
         zones.value = loadZones()
         outbox.value = loadOutbox()
+        hub.value = loadHub()
+        loadFeeds()?.let { feeds.value = it }
+        apps.value = loadApps()
+        targetMin.value = p.getInt("target", 30)
+        allowMobile.value = p.getBoolean("mobile", true)
     }
 
     // ---------- dead zones ----------
@@ -65,7 +85,7 @@ object Store {
         var best: Ahead? = null
         for (z in zones.value) {
             val d = distMeters(lat, lon, z.lat, z.lon)
-            if (d > 8000.0 || d < 150.0) continue
+            if (d > 10000.0 || d < 150.0) continue
             if (bearing != null && speed > 1.5f) {
                 val b = bearingTo(lat, lon, z.lat, z.lon)
                 val diff = abs(((b - bearing + 540.0) % 360.0) - 180.0)
@@ -85,7 +105,7 @@ object Store {
         val dur = if (a.zone.samples > 0) {
             " It usually lasts about " + maxOf(1, (a.zone.avgSecs / 60.0).roundToInt()) + " min."
         } else ""
-        return "Dead zone about $km km ahead$eta.$dur Send your messages now."
+        return "Dead zone about $km km ahead$eta.$dur"
     }
 
     private fun saveZones() {
@@ -143,5 +163,110 @@ object Store {
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    // ---------- hub ----------
+    fun setHub(list: List<HubItem>) {
+        hub.value = list
+        val arr = JSONArray()
+        list.forEach {
+            arr.put(JSONObject()
+                .put("id", it.id).put("type", it.type).put("title", it.title)
+                .put("source", it.source).put("seconds", it.seconds)
+                .put("file", it.file).put("ts", it.ts).put("url", it.url))
+        }
+        prefs?.edit()?.putString("hub", arr.toString())?.apply()
+    }
+
+    private fun loadHub(): List<HubItem> {
+        val s = prefs?.getString("hub", null) ?: return emptyList()
+        return try {
+            val a = JSONArray(s)
+            (0 until a.length()).map {
+                val o = a.getJSONObject(it)
+                HubItem(o.getLong("id"), o.getString("type"), o.getString("title"),
+                    o.getString("source"), o.getInt("seconds"), o.getString("file"),
+                    o.getLong("ts"), o.getString("url"))
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun setTarget(min: Int) {
+        targetMin.value = min
+        prefs?.edit()?.putInt("target", min)?.apply()
+    }
+
+    fun setMobile(on: Boolean) {
+        allowMobile.value = on
+        prefs?.edit()?.putBoolean("mobile", on)?.apply()
+    }
+
+    fun addFeed(name: String, url: String) {
+        if (feeds.value.any { it.url == url }) return
+        feeds.value = feeds.value + Feed(name, url)
+        saveFeeds()
+    }
+
+    fun removeFeed(url: String) {
+        feeds.value = feeds.value.filter { it.url != url }
+        saveFeeds()
+    }
+
+    private fun saveFeeds() {
+        val arr = JSONArray()
+        feeds.value.forEach { arr.put(JSONObject().put("name", it.name).put("url", it.url)) }
+        prefs?.edit()?.putString("feeds", arr.toString())?.apply()
+    }
+
+    private fun loadFeeds(): List<Feed>? {
+        val s = prefs?.getString("feeds", null) ?: return null
+        return try {
+            val a = JSONArray(s)
+            (0 until a.length()).map {
+                val o = a.getJSONObject(it)
+                Feed(o.getString("name"), o.getString("url"))
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ---------- apps used while travelling ----------
+    fun bumpApp(pkg: String, label: String, secs: Int) {
+        val cur = apps.value.toMutableList()
+        val i = cur.indexOfFirst { it.pkg == pkg }
+        if (i >= 0) cur[i] = cur[i].copy(seconds = cur[i].seconds + secs)
+        else cur.add(AppUse(pkg, label, secs))
+        apps.value = cur.sortedByDescending { it.seconds }.take(30)
+        val arr = JSONArray()
+        apps.value.forEach {
+            arr.put(JSONObject().put("pkg", it.pkg).put("label", it.label).put("sec", it.seconds))
+        }
+        prefs?.edit()?.putString("apps", arr.toString())?.apply()
+    }
+
+    fun clearApps() {
+        apps.value = emptyList()
+        prefs?.edit()?.remove("apps")?.apply()
+    }
+
+    private fun loadApps(): List<AppUse> {
+        val s = prefs?.getString("apps", null) ?: return emptyList()
+        return try {
+            val a = JSONArray(s)
+            (0 until a.length()).map {
+                val o = a.getJSONObject(it)
+                AppUse(o.getString("pkg"), o.getString("label"), o.getInt("sec"))
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun topAppsText(n: Int): String? {
+        val names = apps.value.take(n).map { it.label }
+        return if (names.isEmpty()) null else names.joinToString(", ")
     }
 }
