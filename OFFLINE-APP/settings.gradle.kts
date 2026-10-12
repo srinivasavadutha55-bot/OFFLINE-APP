@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "SignalShield"
 include(":app")
+project(":app").projectDir = file("OFFLINE-APP/app")
